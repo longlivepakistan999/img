@@ -19,7 +19,8 @@ A free image asset platform built with PHP + MySQL, designed to help other websi
 | Database | MySQL 8.0 |
 | Frontend | Blade templates + Tailwind CSS + Alpine.js |
 | Image Processing | Intervention Image (PHP) |
-| Storage | Local filesystem (dev) / Cloud OSS/S3 (prod), configurable via Laravel Filesystem |
+| Storage | Local filesystem (dev) / **Cloudflare R2** (prod) — S3-compatible, **zero egress fees** |
+| CDN | **Cloudflare CDN** — free tier or Pro ($20/mo), paired with R2 for zero-cost image delivery |
 | Queue | Laravel Queue (Redis/database driver) for async image processing |
 | Cache | Redis (required for production scale) |
 | Search | Meilisearch (recommended for millions of records) / MySQL fulltext (dev only) |
@@ -200,12 +201,30 @@ img/
 - CORS support for cross-origin usage
 - Response includes direct image URLs + metadata
 
-### 9. Storage System
-- **Dual mode**: local filesystem (dev/small scale) and cloud storage (S3/OSS for production)
+### 9. Storage System (Cloudflare R2 — 最省方案)
+
+**Why R2**: S3-compatible API, storage $0.015/GB, **出站流量完全免费 ($0)**. 100万张图片约 $42/月，不限流量。
+
+- **Dev**: Local filesystem (`FILESYSTEM_DISK=local`)
+- **Prod**: Cloudflare R2 (`FILESYSTEM_DISK=r2`) — uses S3-compatible driver in Laravel
+- **CDN**: Cloudflare CDN automatically caches R2 objects via custom domain (zero config)
 - Configured via `FILESYSTEM_DISK` in `.env`
 - Images organized by hash sharding: `images/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}` (supports millions of files)
 - Thumbnails stored alongside: `images/{hash[0:2]}/{hash[2:4]}/{hash}_thumb_{size}.webp`
 - Original files always preserved
+- R2 public bucket with custom domain (e.g., `img.yourdomain.com`) for direct CDN access
+
+#### Cost Estimate (100万张图片)
+| Item | Cost |
+|------|------|
+| R2 Storage (~2.8TB) | ~$42/月 |
+| R2 Egress (出站流量) | **$0 (免费)** |
+| R2 Class A ops (写入, 10万次/月) | ~$4.50 |
+| R2 Class B ops (读取, 1000万次/月) | ~$3.60 |
+| Cloudflare Pro (CDN + 安全) | $20/月 |
+| **合计** | **~$70/月** |
+
+> 对比 AWS S3 中流量场景 ~$1,414/月，**省了 95%+**
 
 ### 10. Scalability & High Concurrency (百万~千万级)
 
@@ -224,7 +243,7 @@ The platform is designed to support 1M–10M+ images with high concurrent users.
 - **Multi-layer cache**:
   - L1: Application-level (Laravel model caching for hot data)
   - L2: Redis (page cache, query result cache, image metadata cache)
-  - L3: CDN (static assets, image files)
+  - L3: Cloudflare CDN (R2 image objects cached at edge, static assets)
 - **Cache strategies**:
   - Homepage/trending: Cache for 5 minutes, warm via scheduled task
   - Image detail pages: Cache until image metadata changes (event-based invalidation)
@@ -243,11 +262,13 @@ The platform is designed to support 1M–10M+ images with high concurrent users.
 - **Queue workers**: Multiple queue workers (Horizon recommended) for parallel async processing
 - **Static asset optimization**: Vite build with minification, gzip/brotli compression in Nginx
 
-#### Image Storage at Scale
-- **Directory sharding**: Don't put millions of files in one directory. Use hash-based sharding: `images/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}` (creates ~65K subdirectories)
-- **CDN**: Production must use CDN (CloudFlare, AWS CloudFront, or Alibaba CDN) for image delivery
+#### Image Storage at Scale (Cloudflare R2 + CDN)
+- **Directory sharding**: Hash-based key structure in R2: `images/{hash[0:2]}/{hash[2:4]}/{hash}.{ext}` (~65K prefix groups for efficient listing)
+- **CDN**: Cloudflare CDN auto-caches R2 objects via custom domain — zero egress cost, global edge delivery
+- **Cache-Control headers**: Set `Cache-Control: public, max-age=31536000, immutable` on image objects (content-addressed, never changes)
 - **Thumbnail pre-generation**: Generate all thumbnail sizes at upload time, not on-demand
-- **Storage cleanup**: Scheduled artisan command to remove orphaned files
+- **Storage cleanup**: Scheduled artisan command to remove orphaned R2 objects
+- **R2 lifecycle rules**: Optional — auto-delete temporary upload chunks after 24h
 
 #### Search at Scale
 - **Meilisearch**: Required for production with millions of records. MySQL fulltext degrades beyond 100K rows
@@ -582,7 +603,7 @@ npm run dev   # development with HMR
 1. **Free platform**: No payment, no user accounts required for browsing/downloading. Admin panel for content management only.
 2. **Duplicate rejection**: Images that match existing entries (by perceptual hash) are rejected at upload time with a message linking to the existing image.
 3. **Async processing**: All heavy operations (thumbnail generation, AI recognition, hash computation) run in background queue jobs to keep uploads fast.
-4. **Storage abstraction**: Use Laravel's Filesystem abstraction. Swap between local and S3/OSS by changing one `.env` variable.
+4. **Storage: Cloudflare R2**: Production uses R2 (S3-compatible, zero egress fees). Dev uses local filesystem. Switch via `FILESYSTEM_DISK` env variable.
 5. **AI as plugin**: The AI vision system is behind an interface. The platform works fully without AI configured — titles/descriptions can be set manually.
 6. **SEO-friendly**: Clean URLs, proper meta tags, structured data (schema.org ImageObject), sitemap generation.
 7. **API-first mindset**: While the web UI is the primary interface, all data is also available via REST API for programmatic access by other websites.
@@ -616,11 +637,14 @@ DB_DATABASE=img_platform
 DB_USERNAME=root
 DB_PASSWORD=
 
-FILESYSTEM_DISK=local          # 'local' or 's3'
-AWS_ACCESS_KEY_ID=             # For S3/OSS storage
-AWS_SECRET_ACCESS_KEY=
-AWS_DEFAULT_REGION=
-AWS_BUCKET=
+FILESYSTEM_DISK=local          # 'local' (dev) or 'r2' (prod)
+
+# Cloudflare R2 (S3-compatible, zero egress fees)
+CLOUDFLARE_R2_ACCESS_KEY_ID=
+CLOUDFLARE_R2_SECRET_ACCESS_KEY=
+CLOUDFLARE_R2_BUCKET=img-platform
+CLOUDFLARE_R2_ENDPOINT=https://<account_id>.r2.cloudflarestorage.com
+CLOUDFLARE_R2_URL=https://img.yourdomain.com   # Custom domain via Cloudflare CDN
 
 QUEUE_CONNECTION=redis          # 'sync' (dev), 'redis' (prod)
 CACHE_STORE=redis              # 'file' (dev), 'redis' (prod)
